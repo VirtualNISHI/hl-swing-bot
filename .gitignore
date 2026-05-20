@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+# NOTE: data/market.duckdb IS committed. The GitHub Actions runner is the
+# source of truth and commits new rows back every 5 min. WAL is transient.
+data/*.duckdb.wal
+data/*.duckdb-shm
+*.log
+.ipynb_checkpoints/
