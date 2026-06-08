@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Iterable
@@ -71,14 +72,25 @@ def _iter_records(text: str) -> Iterable[dict]:
 
 
 def read_source(*, local_path: Path | None = None, url: str | None = None) -> str:
-    """Return the raw JSONL text. Prefer a local file if it exists, else fetch URL."""
+    """Return the raw JSONL text. Prefer a local file if it exists, else fetch URL.
+
+    Returns "" if the remote file does not exist yet (HTTP 404) — the upstream
+    JSONL is only created on the first slot-gate crawl, so an empty result is a
+    normal "no data yet" state, not an error.
+    """
     p = local_path or DEFAULT_LOCAL_PATH
     if p.exists():
         return p.read_text(encoding="utf-8")
     src = url or DEFAULT_RAW_URL
     log.info("liquidation_cascade: local file absent, fetching %s", src)
-    with urllib.request.urlopen(src, timeout=30) as resp:
-        return resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(src, timeout=30) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log.info("liquidation_cascade: remote JSONL not present yet (404) — no data")
+            return ""
+        raise
 
 
 def build_feature_rows(text: str, *, since_ms: int = 0) -> list[tuple]:
