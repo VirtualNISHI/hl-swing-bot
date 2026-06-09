@@ -228,6 +228,13 @@ def compute_features(storage: Storage, coin: str, *, now_ms: int) -> dict | None
         funding_now = fundings[-1] if fundings else 0.0
         funding_z_24 = 0.0
 
+    # Path-B prep: read the liquidation-cascade bias from the feature store
+    # (forward-filled to this bar). NOT yet used in the score — recorded in
+    # features_json so each emitted signal carries the bias at signal time, for
+    # the eventual Spearman(bias, forward-return) test that gates wiring it in.
+    bias = storage.latest_feature_value(coin, "liquidation_cascade_bias_1h", as_of_ms=now_ms)
+    bias_oi_fresh = storage.latest_feature_value(coin, "liquidation_cascade_oi_fresh_1h", as_of_ms=now_ms)
+
     return {
         "bar_close_ms": bar_now.hour_ms + 60 * 60 * 1000,
         "close": close_now,
@@ -243,6 +250,8 @@ def compute_features(storage: Storage, coin: str, *, now_ms: int) -> dict | None
         "trend_4h": trend_4h,
         "funding_rate_hourly": funding_now,
         "funding_z_24": funding_z_24,
+        "liq_bias": bias,                 # signed [-100..100], None if not yet collected
+        "liq_bias_oi_fresh": bias_oi_fresh,
         "hist_bars": len(bars),
         "hist_atr_median_pct": statistics.median(hist_atr_pct) if hist_atr_pct else 0.0,
     }

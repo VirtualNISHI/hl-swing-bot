@@ -182,8 +182,12 @@ def run_backtest(
     vol_min: float = FIRE_VOL_Z_MIN,
     slippage_bps: float = 5.0,
     ttl_hours: int = SIGNAL_TTL_HOURS,
+    short_only: bool = False,
 ) -> dict:
-    """Returns a summary dict with all signals and aggregate metrics."""
+    """Returns a summary dict with all signals and aggregate metrics.
+
+    short_only=True drops LONG signals (Path-A specialization).
+    """
     signals: list[BTSignal] = []
     last_dir: str | None = None
     last_idx: int = -10_000
@@ -194,6 +198,8 @@ def run_backtest(
         if not f:
             continue
         direction = "LONG" if f["ret_1h"] > 0 else "SHORT"
+        if short_only and direction == "LONG":
+            continue
         elapsed_min = (i - last_idx) * 60
         if last_dir is not None:
             if last_dir == direction and elapsed_min < COOLDOWN_SAME_DIR_MIN:

@@ -36,6 +36,15 @@ FIRE_MOVE_PER_ATR_MIN = 1.0
 FIRE_VOL_Z_MIN = 1.0
 FIRE_FUNDING_Z_MAX = 2.5  # |funding_z_24| must be <= this
 
+# Path A (2026-06-10): SHORT-ONLY specialization. The 208-day walk-forward showed
+# the LONG branch loses in every regime (uptrend -0.83% net, chop bleeds) while
+# short-side downtrends are the only profitable cell (+0.47% net). Crypto cascades
+# are also structurally asymmetric (forced long-liquidations cascade harder than
+# short squeezes). So we disable LONG emission and forward-test the short edge.
+# LONGs are still logged as would-be signals for out-of-sample confirmation and
+# for the Path-B (liquidation-bias squeeze) R&D. Set True to re-enable longs.
+ENABLE_LONG = False
+
 # Risk/reward.
 STOP_ATR_MULT = 1.5
 TARGET_ATR_MULT = 2.5  # R:R = 1:1.67
@@ -125,6 +134,7 @@ def evaluate_and_emit(storage: Storage, coin: str, *, now_ms: int,
         or (direction == "SHORT" and features["trend_4h"] <= -1)
     )
     funding_ok = abs(features["funding_z_24"]) <= FIRE_FUNDING_Z_MAX
+    long_allowed = ENABLE_LONG or direction == "SHORT"
     in_cd, cd_reason = _in_cooldown(storage, coin, direction=direction, now_ms=now_ms)
 
     if not passes_score: reasons.append(f"score {score:.2f} < {FIRE_SCORE_MIN}")
@@ -132,13 +142,23 @@ def evaluate_and_emit(storage: Storage, coin: str, *, now_ms: int,
     if not passes_vol:   reasons.append(f"vol_z {features['vol_z_168']:.2f} < {FIRE_VOL_Z_MIN}")
     if not trend_aligned: reasons.append(f"trend_4h={features['trend_4h']} vs {direction}")
     if not funding_ok:   reasons.append(f"|funding_z| {abs(features['funding_z_24']):.2f} > {FIRE_FUNDING_Z_MAX}")
+    if not long_allowed: reasons.append("LONG disabled (short-only mode)")
     if in_cd and cd_reason: reasons.append(cd_reason)
 
-    fired = (passes_score and passes_move and passes_vol and trend_aligned
-             and funding_ok and not in_cd)
+    # would_fire = all signal gates pass; fired = also passes the direction policy.
+    would_fire = (passes_score and passes_move and passes_vol and trend_aligned
+                  and funding_ok and not in_cd)
+    fired = would_fire and long_allowed
 
     if not fired:
-        log.info("no fire (%s): score=%.2f reasons=%s", direction, score, "; ".join(reasons))
+        # Log suppressed-but-otherwise-valid LONGs explicitly so we can confirm
+        # out-of-sample that the long side keeps losing (Path-A validation) and
+        # accumulate them for Path-B (bias-driven long rebuild).
+        if would_fire and not long_allowed:
+            log.info("WOULD-BE LONG suppressed (short-only): score=%.2f move/ATR=%.2f",
+                     score, features["move_per_atr"])
+        else:
+            log.info("no fire (%s): score=%.2f reasons=%s", direction, score, "; ".join(reasons))
         return None
 
     # Stop and target from ATR.

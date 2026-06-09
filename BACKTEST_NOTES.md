@@ -136,6 +136,27 @@ But it is clearly "no edge as built" — marginal/breakeven, negative after hone
   — higher upside, unproven, needs the bias Spearman test first.
 The data favors (A) now, (B) as the R&D track to earn back the long side.
 
+### Path A IMPLEMENTED + validated (short-only, `ENABLE_LONG=False`)
+
+Re-ran the 208d walk-forward with `short_only=True` (drops the losing LONG branch):
+
+| mode | n | hit | gross | **net (0.19% RT)** | maxDD |
+|---|---|---|---|---|---|
+| both-ways | 87 | 40% | +0.16% | **−0.03%** | 16.3% |
+| **SHORT-only** | 49 | 45% | +0.28% | **+0.09%** | **9.8%** |
+
+Dropping longs flips net expectancy **positive** (+0.09%/trade, ≈+3.9% compounded over 7mo)
+and **halves drawdown** (16.3%→9.8%). Thin but real, and structurally motivated (cascade
+asymmetry). **Now live in paper as short-only.** Suppressed would-be LONGs are logged for
+out-of-sample confirmation + Path-B. Caveats: still in-sample selection; +0.09% is marginal;
+maxDD 9.8% still >8% graduation gate (→ needs the fractional-risk sizer). Forward paper +
+the kill-switch remain the real test.
+
+### Path B prep (liquidation-bias long rebuild)
+`compute_features()` now reads `liq_bias` (forward-filled from the store) into every feature
+dict, so each emitted signal records the bias at signal time. Not yet used in the score —
+that waits on the Spearman(bias, forward-return) test once enough forward bias accumulates.
+
 ## Quant panel review — 2026-06-10 (Codex + Grok + 6-lens panel)
 
 Three independent reviews converged: **as built, this is a coin-flip after costs.** The
