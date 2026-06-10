@@ -35,6 +35,9 @@ FIRE_SCORE_MIN = 3.0
 FIRE_MOVE_PER_ATR_MIN = 1.0
 FIRE_VOL_Z_MIN = 1.0
 FIRE_FUNDING_Z_MAX = 2.5  # |funding_z_24| must be <= this
+# Red-streak confirmation (joint-backtest validated 2026-06-10 with slope gate:
+# BTC n=26 NET +0.758, ETH n=26 NET +0.877, split-half positive on both).
+FIRE_RED_4H_MIN = 2
 
 # Path A (2026-06-10): SHORT-ONLY specialization. The 208-day walk-forward showed
 # the LONG branch loses in every regime (uptrend -0.83% net, chop bleeds) while
@@ -143,18 +146,31 @@ def evaluate_and_emit(storage: Storage, coin: str, *, now_ms: int,
         (direction == "LONG" and features["trend_4h"] >= 1)
         or (direction == "SHORT" and features["trend_4h"] <= -1)
     )
+    # Slope gate (confirmed): for SHORT the 4h SMA50 must itself be declining.
+    # Undefined slope (0, insufficient history) blocks. LONGs (if ever re-enabled)
+    # would symmetrically require a rising SMA.
+    slope_aligned = (
+        (direction == "SHORT" and features["trend_4h_slope"] <= -1)
+        or (direction == "LONG" and features["trend_4h_slope"] >= 1)
+    )
+    # Red-streak confirmation applies to SHORTs (LONG symmetric variant untested).
+    streak_ok = direction != "SHORT" or features["red_4h_streak"] >= FIRE_RED_4H_MIN
     funding_ok = abs(features["funding_z_24"]) <= FIRE_FUNDING_Z_MAX
     long_allowed = ENABLE_LONG or direction == "SHORT"
     in_cd, cd_reason = _in_cooldown(storage, coin, direction=direction, now_ms=now_ms)
     # Aggregate-risk cap: each open signal already risks RISK_FRAC; adding one more
-    # must not push total open risk over CLUSTER_RISK_CAP.
-    open_risk = len(storage.open_signals(coin)) * RISK_FRAC
+    # must not push total open risk over CLUSTER_RISK_CAP. GLOBAL across coins —
+    # BTC/ETH signals co-fire on the same cascade (40/49 within 6h), so cross-coin
+    # exposure is one correlated bet, not diversification.
+    open_risk = storage.open_signal_count_all() * RISK_FRAC
     cluster_ok = (open_risk + RISK_FRAC) <= CLUSTER_RISK_CAP + 1e-9
 
     if not passes_score: reasons.append(f"score {score:.2f} < {FIRE_SCORE_MIN}")
     if not passes_move:  reasons.append(f"move/ATR {features['move_per_atr']:.2f} < {FIRE_MOVE_PER_ATR_MIN}")
     if not passes_vol:   reasons.append(f"vol_z {features['vol_z_168']:.2f} < {FIRE_VOL_Z_MIN}")
     if not trend_aligned: reasons.append(f"trend_4h={features['trend_4h']} vs {direction}")
+    if not slope_aligned: reasons.append(f"slope gate (trend_4h_slope={features['trend_4h_slope']})")
+    if not streak_ok:    reasons.append(f"red streak {features['red_4h_streak']} < {FIRE_RED_4H_MIN}")
     if not funding_ok:   reasons.append(f"|funding_z| {abs(features['funding_z_24']):.2f} > {FIRE_FUNDING_Z_MAX}")
     if not long_allowed: reasons.append("LONG disabled (short-only mode)")
     if not cluster_ok:   reasons.append(f"cluster risk cap (open {open_risk*100:.1f}% + {RISK_FRAC*100:.1f}% > {CLUSTER_RISK_CAP*100:.1f}%)")
@@ -162,7 +178,7 @@ def evaluate_and_emit(storage: Storage, coin: str, *, now_ms: int,
 
     # would_fire = all signal gates pass; fired = also passes direction + risk policy.
     would_fire = (passes_score and passes_move and passes_vol and trend_aligned
-                  and funding_ok and not in_cd)
+                  and slope_aligned and streak_ok and funding_ok and not in_cd)
     fired = would_fire and long_allowed and cluster_ok
 
     if not fired:

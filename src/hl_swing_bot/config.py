@@ -20,8 +20,15 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=PROJECT_ROOT / "data", alias="DATA_DIR")
 
     hl_coin: str = Field(default="BTC", alias="HL_COIN")
+    hl_coins_raw: str = Field(default="BTC,ETH", alias="HL_COINS")
     hl_candle_interval: str = Field(default="1m", alias="HL_CANDLE_INTERVAL")
     hl_lookback_minutes: int = Field(default=120, alias="HL_LOOKBACK_MINUTES")
+
+    @property
+    def hl_coins(self) -> list[str]:
+        """Traded universe. BTC+ETH validated (identical frozen signal, global
+        cluster cap); SOL explicitly rejected (split-half sign flip)."""
+        return [c.strip().upper() for c in self.hl_coins_raw.split(",") if c.strip()]
 
     @property
     def duckdb_path(self) -> Path:

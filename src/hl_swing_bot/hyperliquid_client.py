@@ -176,6 +176,41 @@ class HyperliquidClient:
         return out
 
 
+    def fetch_funding_history(
+        self, coin: str, *, start_ms: int, end_ms: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Settled hourly funding records as (hour_ms, rate), oldest first.
+
+        The endpoint returns ~500 records per call; we paginate by advancing
+        startTime past the last received record. Timestamps arrive with small
+        ms offsets (e.g. ...00014) — we floor to the hour.
+        """
+        if end_ms is None:
+            end_ms = int(time.time() * 1000)
+        out: dict[int, float] = {}
+        cursor = start_ms
+        for _ in range(100):  # hard cap: 100 pages = ~50k hours
+            raw = self._post({
+                "type": "fundingHistory", "coin": coin,
+                "startTime": cursor, "endTime": end_ms,
+            })
+            if not raw:
+                break
+            for rec in raw:
+                try:
+                    t = int(rec["time"])
+                    out[t - (t % 3_600_000)] = float(rec["fundingRate"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+            last_t = max(int(r["time"]) for r in raw)
+            if last_t >= end_ms or len(raw) < 2:
+                break
+            cursor = last_t + 1
+        rows = sorted(out.items())
+        log.info("hyperliquid: fetched %d hourly funding records for %s", len(rows), coin)
+        return rows
+
+
 @contextmanager
 def open_client(user_agent: str = "hl-swing-bot/0.1") -> Iterator[HyperliquidClient]:
     with HyperliquidClient(user_agent=user_agent) as c:

@@ -47,6 +47,20 @@ CREATE TABLE IF NOT EXISTS perp_snapshots (
 );
 """
 
+# Settled hourly funding rates from the HL fundingHistory endpoint. One row per
+# (coin, hour). Backfilled at collector startup (>=169h needed for funding_z_168)
+# and appended forward each cycle. This is the authoritative funding source —
+# perp_snapshots.funding_rate_hourly is the *current/predicted* rate sampled at
+# poll time and arrives at collector cadence (5min), not hourly.
+SCHEMA_FUNDING_RATES = """
+CREATE TABLE IF NOT EXISTS funding_rates (
+    coin     VARCHAR NOT NULL,
+    hour_ms  BIGINT  NOT NULL,
+    rate     DOUBLE  NOT NULL,
+    PRIMARY KEY (coin, hour_ms)
+);
+"""
+
 SCHEMA_SIGNALS = """
 CREATE SEQUENCE IF NOT EXISTS signal_id_seq;
 CREATE TABLE IF NOT EXISTS signals (
@@ -107,6 +121,7 @@ class Storage:
         self._conn = duckdb.connect(str(db_path))
         self._conn.execute(SCHEMA_CANDLES)
         self._conn.execute(SCHEMA_FUNDING)
+        self._conn.execute(SCHEMA_FUNDING_RATES)
         self._conn.execute(SCHEMA_SIGNALS)
         self._conn.execute(SCHEMA_FEATURES)
 
@@ -215,17 +230,64 @@ class Storage:
         ).fetchone()
         return tuple(row) if row else None
 
+    def upsert_funding_rates(self, coin: str, rows: list[tuple[int, float]]) -> int:
+        """Insert (hour_ms, rate) settled funding records. Idempotent."""
+        if not rows:
+            return 0
+        self._conn.executemany(
+            """
+            INSERT INTO funding_rates VALUES (?,?,?)
+            ON CONFLICT (coin, hour_ms) DO UPDATE SET rate = excluded.rate
+            """,
+            [(coin, h, r) for h, r in rows],
+        )
+        return len(rows)
+
+    def latest_funding_hour_ms(self, coin: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT MAX(hour_ms) FROM funding_rates WHERE coin = ?", (coin,)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def funding_rate_count(self, coin: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM funding_rates WHERE coin = ?", (coin,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def recent_funding_rates(self, coin: str, *, n: int = 24) -> list[float]:
-        """Last ``n`` funding rates, oldest first."""
+        """Last ``n`` HOURLY funding rates, oldest first.
+
+        Primary source: the settled funding_rates table (one row per hour).
+        Fallback (table empty, e.g. before first backfill): perp_snapshots
+        deduped BY HOUR — the previous implementation returned the last n raw
+        snapshots, which at 5-min collector cadence covered ~n/12 hours and
+        silently corrupted every funding z-score.
+        """
         rows = self._conn.execute(
             """
-            SELECT funding_rate_hourly FROM (
-                SELECT funding_rate_hourly, snapshot_time_ms
+            SELECT rate FROM (
+                SELECT rate, hour_ms FROM funding_rates
+                WHERE coin = ?
+                ORDER BY hour_ms DESC
+                LIMIT ?
+            ) ORDER BY hour_ms ASC
+            """,
+            (coin, n),
+        ).fetchall()
+        if rows:
+            return [float(r[0]) for r in rows]
+        rows = self._conn.execute(
+            """
+            SELECT rate FROM (
+                SELECT arg_max(funding_rate_hourly, snapshot_time_ms) AS rate,
+                       snapshot_time_ms // 3600000 AS hr
                 FROM perp_snapshots
                 WHERE coin = ?
-                ORDER BY snapshot_time_ms DESC
+                GROUP BY hr
+                ORDER BY hr DESC
                 LIMIT ?
-            ) ORDER BY snapshot_time_ms ASC
+            ) ORDER BY hr ASC
             """,
             (coin, n),
         ).fetchall()
@@ -264,6 +326,15 @@ class Storage:
         keys = ("signal_id", "generated_at_ms", "direction", "entry_price",
                 "stop_price", "target_price", "expires_at_ms", "composite_score")
         return [dict(zip(keys, r)) for r in rows]
+
+    def open_signal_count_all(self) -> int:
+        """Open (status='NEW') signals across ALL coins — the global cluster
+        cap counts correlated cross-coin exposure (40/49 BTC signals co-fire
+        with ETH within 6h)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE status = 'NEW'"
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def close_signal(self, *, signal_id: int, status: str,
                      closed_at_ms: int, realized_return: float) -> None:

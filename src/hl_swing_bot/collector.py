@@ -25,38 +25,50 @@ def collect_once() -> dict[str, int]:
     holes (Hyperliquid candleSnapshot caps ~5000 bars per call ≈ 3.5 days at 1m).
     """
     settings = load_settings()
-    stats: dict[str, int] = {"candles_upserted": 0, "snapshots_inserted": 0}
+    stats: dict[str, int] = {"candles_upserted": 0, "snapshots_inserted": 0,
+                             "funding_upserted": 0}
 
     with open_client() as hl, Storage(settings.duckdb_path) as store:
-        latest_ms = store.latest_candle_time_ms(
-            settings.hl_coin, settings.hl_candle_interval
-        )
         now_ms = int(time.time() * 1000)
-        if latest_ms is None:
-            start_ms = now_ms - settings.hl_lookback_minutes * 60_000
-        else:
-            start_ms = latest_ms - 10 * 60_000  # 10-min overlap for re-forming bar
+        # One metaAndAssetCtxs call serves every coin's snapshot.
+        perps = {p.coin: p for p in hl.fetch_all_perps()}
 
-        candles = hl.fetch_candles(
-            settings.hl_coin,
-            interval=settings.hl_candle_interval,
-            start_ms=start_ms,
-            end_ms=now_ms,
-        )
-        stats["candles_upserted"] = store.upsert_candles(candles)
-        stats["fetch_window_minutes"] = (now_ms - start_ms) // 60_000
+        for coin in settings.hl_coins:
+            latest_ms = store.latest_candle_time_ms(coin, settings.hl_candle_interval)
+            if latest_ms is None:
+                start_ms = now_ms - settings.hl_lookback_minutes * 60_000
+            else:
+                start_ms = latest_ms - 10 * 60_000  # 10-min overlap for re-forming bar
 
-        perp = hl.fetch_perp(settings.hl_coin)
-        if perp is not None:
-            store.insert_perp_snapshot(perp, snapshot_time_ms=int(time.time() * 1000))
-            stats["snapshots_inserted"] = 1
+            candles = hl.fetch_candles(
+                coin,
+                interval=settings.hl_candle_interval,
+                start_ms=start_ms,
+                end_ms=now_ms,
+            )
+            stats["candles_upserted"] += store.upsert_candles(candles)
 
-        stats["total_candles_in_db"] = store.candle_count(
-            settings.hl_coin, settings.hl_candle_interval
-        )
-        latest = store.latest_candle_time_ms(settings.hl_coin, settings.hl_candle_interval)
-        if latest is not None:
-            stats["latest_candle_time_ms"] = latest
+            # Settled hourly funding: backfill 200h on first run (funding_z_168
+            # needs 169), then append incrementally from the last stored hour.
+            last_funding = store.latest_funding_hour_ms(coin)
+            if last_funding is None or store.funding_rate_count(coin) < 169:
+                funding_start = now_ms - 200 * 3_600_000
+            else:
+                funding_start = last_funding + 1
+            if now_ms - funding_start >= 3_600_000:
+                frows = hl.fetch_funding_history(
+                    coin, start_ms=funding_start, end_ms=now_ms
+                )
+                stats["funding_upserted"] += store.upsert_funding_rates(coin, frows)
+
+            perp = perps.get(coin)
+            if perp is not None:
+                store.insert_perp_snapshot(perp, snapshot_time_ms=now_ms)
+                stats["snapshots_inserted"] += 1
+
+            stats[f"candles_{coin}"] = store.candle_count(
+                coin, settings.hl_candle_interval
+            )
 
     return stats
 

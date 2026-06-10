@@ -29,8 +29,13 @@ MIN_BARS = max(ATR_PERIOD + 5, 60)
 # Trend filter: simple MA period applied to 4h closes.
 TREND_MA_PERIOD = 50
 
-# Funding z-score window (last N hourly fundings).
+# Slope gate: SMA50 must be lower than its value this many 4h bars ago.
+# Lookbacks 5-12 select identical trades (validated); 10 is the canonical value.
+SLOPE_LOOKBACK_4H = 10
+
+# Funding z-score windows (hourly fundings).
 FUNDING_Z_WINDOW = 24
+FUNDING_Z_WINDOW_LONG = 168  # 1 week — the window that actually carried signal
 
 
 @dataclass
@@ -218,15 +223,50 @@ def compute_features(storage: Storage, coin: str, *, now_ms: int) -> dict | None
     else:
         trend_4h = 0
 
-    # Funding context — z-score of latest funding vs last N hourly fundings.
-    fundings = storage.recent_funding_rates(coin, n=FUNDING_Z_WINDOW + 1)
+    # Slope gate (confirmed +0.09 -> +0.32%/trade on 208d, cross-asset replicated):
+    # the SMA50 itself must be declining — current SMA50 vs the SMA50 computed
+    # SLOPE_LOOKBACK_4H bars earlier. 0 = undefined (insufficient history) and is
+    # treated as BLOCKING by the signal gate.
+    if len(bars_4h) >= TREND_MA_PERIOD + SLOPE_LOOKBACK_4H + 1:
+        sma50_4h_prev = statistics.mean(
+            b.close for b in bars_4h[-TREND_MA_PERIOD - SLOPE_LOOKBACK_4H - 1:-SLOPE_LOOKBACK_4H - 1]
+        )
+        trend_4h_slope = (
+            -1 if sma50_4h < sma50_4h_prev else (1 if sma50_4h > sma50_4h_prev else 0)
+        )
+    else:
+        trend_4h_slope = 0
+
+    # Red-streak confirmation: consecutive red 4h bars (close<open) scanning
+    # backward from the current (possibly partial) 4h bucket — same partial-
+    # bucket convention as trend_4h, look-ahead-safe.
+    red_4h_streak = 0
+    for b in reversed(bars_4h):
+        if b.close < b.open:
+            red_4h_streak += 1
+        else:
+            break
+
+    # Funding context — z-scores of latest funding vs trailing hourly fundings.
+    # z_168 (week-relative, mean/pstdev — the validated convention) is LOGGED on
+    # every signal but NOT gated yet: it passed split-half on BTC (+0.78, p=0.013)
+    # but failed cross-asset on ETH/SOL. Pre-registered re-check after 20 paper
+    # signals. z_24 retained for the legacy |z|<=2.5 sanity gate.
+    fundings = storage.recent_funding_rates(coin, n=FUNDING_Z_WINDOW_LONG + 1)
     if len(fundings) >= 5:
         funding_now = fundings[-1]
-        funding_hist = fundings[:-1] if len(fundings) > 1 else fundings
-        funding_z_24 = robust_z(funding_now, funding_hist)
+        funding_hist24 = fundings[-(FUNDING_Z_WINDOW + 1):-1]
+        funding_z_24 = robust_z(funding_now, funding_hist24)
     else:
         funding_now = fundings[-1] if fundings else 0.0
         funding_z_24 = 0.0
+    if len(fundings) >= FUNDING_Z_WINDOW_LONG + 1:
+        hist168 = fundings[:-1][-FUNDING_Z_WINDOW_LONG:]
+        mu = statistics.mean(hist168)
+        sd = statistics.pstdev(hist168)
+        funding_z_168 = (funding_now - mu) / sd if sd > 0 else 0.0
+    else:
+        funding_z_168 = None  # insufficient history — logged as null, never gated
 
     # Path-B prep: read the liquidation-cascade bias from the feature store
     # (forward-filled to this bar). NOT yet used in the score — recorded in
@@ -248,8 +288,11 @@ def compute_features(storage: Storage, coin: str, *, now_ms: int) -> dict | None
         "vol_z_168": vol_z_168,
         "move_per_atr_z": move_per_atr_z,
         "trend_4h": trend_4h,
+        "trend_4h_slope": trend_4h_slope,
+        "red_4h_streak": red_4h_streak,
         "funding_rate_hourly": funding_now,
         "funding_z_24": funding_z_24,
+        "funding_z_168": funding_z_168,
         "liq_bias": bias,                 # signed [-100..100], None if not yet collected
         "liq_bias_oi_fresh": bias_oi_fresh,
         "hist_bars": len(bars),

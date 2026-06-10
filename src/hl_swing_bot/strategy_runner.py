@@ -28,42 +28,45 @@ log = logging.getLogger(__name__)
 def run_once(*, dry_run: bool = False) -> dict:
     settings = load_settings()
     now_ms = int(time.time() * 1000)
-    stats = {"outcomes": 0, "signal_fired": False, "open_after": 0}
+    stats: dict = {"outcomes": 0, "signals_fired": [], "open_after": 0}
 
     with Storage(settings.duckdb_path) as store, \
          DiscordClient(settings.discord_webhook_url, dry_run=dry_run) as discord, \
          open_client() as hl:
 
-        # 1. Mark price for outcomes — prefer fresh HL perp snapshot.
-        perp = hl.fetch_perp(settings.hl_coin)
-        if perp is None:
-            log.warning("could not fetch perp for outcome check; aborting")
-            return stats
-        store.insert_perp_snapshot(perp, snapshot_time_ms=now_ms)
-        mark_price = perp.mark_price_usd
+        # One metaAndAssetCtxs call covers every coin's mark price.
+        perps = {p.coin: p for p in hl.fetch_all_perps()}
 
-        # 2. Outcomes for open signals.
-        notifications = update_outcomes(
-            store, settings.hl_coin,
-            mark_price=mark_price, now_ms=now_ms, dry_run=dry_run,
-        )
-        for notif in notifications:
-            publish_outcome(discord, notif)
-        stats["outcomes"] = len(notifications)
+        for coin in settings.hl_coins:
+            perp = perps.get(coin)
+            if perp is None:
+                log.warning("no perp data for %s; skipping", coin)
+                continue
+            store.insert_perp_snapshot(perp, snapshot_time_ms=now_ms)
+            mark_price = perp.mark_price_usd
+            stats[f"mark_{coin}"] = mark_price
 
-        # 3. New signal?
-        new_sig = evaluate_and_emit(
-            store, settings.hl_coin, now_ms=now_ms, dry_run=dry_run,
-        )
-        if new_sig is not None:
-            publish_signal(discord, new_sig)
-            stats["signal_fired"] = True
-            stats["signal_id"] = new_sig["signal_id"]
-            stats["direction"] = new_sig["direction"]
-            stats["composite_score"] = round(new_sig["composite_score"], 2)
+            # 1. Outcomes for open signals on this coin.
+            notifications = update_outcomes(
+                store, coin, mark_price=mark_price, now_ms=now_ms, dry_run=dry_run,
+            )
+            for notif in notifications:
+                publish_outcome(discord, notif)
+            stats["outcomes"] += len(notifications)
 
-        stats["open_after"] = len(store.open_signals(settings.hl_coin))
-        stats["mark_price"] = mark_price
+            # 2. New signal? (cluster cap inside evaluate_and_emit is global,
+            #    so coin order matters only when both fire simultaneously —
+            #    BTC first by list order.)
+            new_sig = evaluate_and_emit(store, coin, now_ms=now_ms, dry_run=dry_run)
+            if new_sig is not None:
+                publish_signal(discord, new_sig)
+                stats["signals_fired"].append(
+                    {"coin": coin, "signal_id": new_sig["signal_id"],
+                     "direction": new_sig["direction"],
+                     "score": round(new_sig["composite_score"], 2)}
+                )
+
+        stats["open_after"] = store.open_signal_count_all()
 
     return stats
 

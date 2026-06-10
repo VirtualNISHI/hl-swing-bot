@@ -1,0 +1,10 @@
+=== BTC (5002 bars) ===
+slope-only            : n= 37  NET=+0.318  h1=+0.272(n=18)  h2=+0.361(n=19)  [PASS]
+slope+streak2         : n= 26  NET=+0.758  h1=+1.119(n=10)  h2=+0.533(n=16)  [PASS]
+slope+BE1.25/TP2.0    : n= 37  NET=+0.454  h1=+0.754(n=18)  h2=+0.169(n=19)  [PASS]
+slope+streak2+BE/TP2.0: n= 26  NET=+0.428  h1=+0.752(n=10)  h2=+0.226(n=16)  [PASS]
+=== ETH (4991 bars) ===
+slope-only            : n= 45  NET=+0.328  h1=+0.509(n=18)  h2=+0.207(n=27)  [PASS]
+slope+streak2         : n= 26  NET=+0.877  h1=+1.154(n=11)  h2=+0.673(n=15)  [PASS]
+slope+BE1.25/TP2.0    : n= 45  NET=+0.448  h1=+1.017(n=18)  h2=+0.069(n=27)  [PASS]
+slope+streak2+BE/TP2.0: n= 26  NET=+0.951  h1=+2.057(n=11)  h2=+0.140(n=15)  [PASS]

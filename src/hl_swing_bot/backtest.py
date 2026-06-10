@@ -30,7 +30,7 @@ from .features import (
 )
 from .signal import (
     COOLDOWN_OPP_DIR_MIN, COOLDOWN_SAME_DIR_MIN,
-    FIRE_MOVE_PER_ATR_MIN, FIRE_SCORE_MIN, FIRE_VOL_Z_MIN,
+    FIRE_MOVE_PER_ATR_MIN, FIRE_RED_4H_MIN, FIRE_SCORE_MIN, FIRE_VOL_Z_MIN,
     SIGNAL_TTL_HOURS, STOP_ATR_MULT, TARGET_ATR_MULT,
 )
 from .storage import Storage
@@ -103,6 +103,21 @@ def _compute_features_at(bars: list[HourlyBar], i: int) -> dict | None:
     else:
         trend_4h = 0
 
+    # Slope gate (mirrors features.py): SMA50 now vs SMA50 10 4h-bars earlier.
+    if len(bars_4h) >= 61:
+        sma50_prev = statistics.mean(b.close for b in bars_4h[-61:-11])
+        trend_4h_slope = -1 if sma50 < sma50_prev else (1 if sma50 > sma50_prev else 0)
+    else:
+        trend_4h_slope = 0
+
+    # Red-streak (mirrors features.py): consecutive red 4h bars incl. partial bucket.
+    red_4h_streak = 0
+    for b in reversed(bars_4h):
+        if b.close < b.open:
+            red_4h_streak += 1
+        else:
+            break
+
     return {
         "close": bar_now.close,
         "atr_1h": atr_now,
@@ -114,6 +129,8 @@ def _compute_features_at(bars: list[HourlyBar], i: int) -> dict | None:
         "robust_z_168": robust_z_close,
         "vol_z_168": vol_z,
         "trend_4h": trend_4h,
+        "trend_4h_slope": trend_4h_slope,
+        "red_4h_streak": red_4h_streak,
         "funding_z_24": 0.0,  # disabled in backtest v1
     }
 
@@ -130,19 +147,33 @@ def _composite_score(f: dict) -> float:
 
 
 def _resolve_outcome(
-    bars: list[HourlyBar], sig: BTSignal, *, ttl_bars: int
+    bars: list[HourlyBar], sig: BTSignal, *, ttl_bars: int,
+    be_trigger: float = 0.0,
 ) -> None:
     """Walk forward from sig.idx+1 through ttl_bars or end of data; set
-    status/exit fields in place."""
+    status/exit fields in place.
+
+    be_trigger > 0 enables the breakeven rule (validated convention): once the
+    bar's favorable extreme moves >= be_trigger (absolute price units) beyond
+    entry, the stop moves to entry — applied from the NEXT bar (we check this
+    bar's exit against the OLD stop first, then arm BE for subsequent bars).
+    """
     end_idx = min(sig.idx + ttl_bars, len(bars) - 1)
+    stop = sig.stop
+    be_armed = False
     for j in range(sig.idx + 1, end_idx + 1):
         b = bars[j]
+        if be_armed and be_trigger > 0:
+            if sig.direction == "LONG":
+                stop = max(stop, sig.entry)
+            else:
+                stop = min(stop, sig.entry)
         if sig.direction == "LONG":
-            if b.low <= sig.stop:
-                sig.status = "HIT_SL"
+            if b.low <= stop:
+                sig.status = "HIT_SL" if stop < sig.entry else "HIT_BE"
                 sig.exit_idx = j
-                sig.exit_price = sig.stop
-                sig.realized_pct = (sig.stop / sig.entry - 1) * 100
+                sig.exit_price = stop
+                sig.realized_pct = (stop / sig.entry - 1) * 100
                 return
             if b.high >= sig.target:
                 sig.status = "HIT_TP"
@@ -150,12 +181,14 @@ def _resolve_outcome(
                 sig.exit_price = sig.target
                 sig.realized_pct = (sig.target / sig.entry - 1) * 100
                 return
+            if be_trigger > 0 and not be_armed and b.high >= sig.entry + be_trigger:
+                be_armed = True
         else:  # SHORT
-            if b.high >= sig.stop:
-                sig.status = "HIT_SL"
+            if b.high >= stop:
+                sig.status = "HIT_SL" if stop > sig.entry else "HIT_BE"
                 sig.exit_idx = j
-                sig.exit_price = sig.stop
-                sig.realized_pct = (sig.entry / sig.stop - 1) * 100
+                sig.exit_price = stop
+                sig.realized_pct = (sig.entry / stop - 1) * 100
                 return
             if b.low <= sig.target:
                 sig.status = "HIT_TP"
@@ -163,6 +196,8 @@ def _resolve_outcome(
                 sig.exit_price = sig.target
                 sig.realized_pct = (sig.entry / sig.target - 1) * 100
                 return
+            if be_trigger > 0 and not be_armed and b.low <= sig.entry - be_trigger:
+                be_armed = True
     # Expired.
     last_close = bars[end_idx].close
     sig.status = "EXPIRED"
@@ -183,10 +218,20 @@ def run_backtest(
     slippage_bps: float = 5.0,
     ttl_hours: int = SIGNAL_TTL_HOURS,
     short_only: bool = False,
+    slope_gate: bool = True,
+    red_streak_min: int = FIRE_RED_4H_MIN,
+    be_trigger_atr: float = 0.0,
+    target_atr_mult: float = TARGET_ATR_MULT,
 ) -> dict:
     """Returns a summary dict with all signals and aggregate metrics.
 
     short_only=True drops LONG signals (Path-A specialization).
+    slope_gate=True requires the 4h SMA50 to be declining for SHORTs (confirmed
+    filter; default ON to mirror live signal.py).
+    red_streak_min>0 additionally requires that many consecutive red 4h bars.
+    be_trigger_atr>0 enables the breakeven exit rule: once price moves that many
+    ATR in favor (bar low), stop moves to entry from the NEXT bar (conservative).
+    target_atr_mult overrides the TP multiple (exit-grid testing).
     """
     signals: list[BTSignal] = []
     last_dir: str | None = None
@@ -215,24 +260,33 @@ def run_backtest(
             (direction == "LONG" and f["trend_4h"] >= 1)
             or (direction == "SHORT" and f["trend_4h"] <= -1)
         )
-        if not (passes_score and passes_move and passes_vol and trend_aligned):
+        slope_aligned = (not slope_gate) or (
+            (direction == "SHORT" and f["trend_4h_slope"] <= -1)
+            or (direction == "LONG" and f["trend_4h_slope"] >= 1)
+        )
+        streak_ok = red_streak_min <= 0 or (
+            direction == "SHORT" and f["red_4h_streak"] >= red_streak_min
+        )
+        if not (passes_score and passes_move and passes_vol and trend_aligned
+                and slope_aligned and streak_ok):
             continue
 
         atr = f["atr_1h"]
         entry = f["close"]
         if direction == "LONG":
             stop = entry - STOP_ATR_MULT * atr
-            target = entry + TARGET_ATR_MULT * atr
+            target = entry + target_atr_mult * atr
         else:
             stop = entry + STOP_ATR_MULT * atr
-            target = entry - TARGET_ATR_MULT * atr
+            target = entry - target_atr_mult * atr
 
         sig = BTSignal(
             idx=i, bar_close_ms=bars[i].hour_ms + HOUR_MS,
             direction=direction, entry=entry, stop=stop, target=target,
             score=score, expires_idx=i + ttl_hours,
         )
-        _resolve_outcome(bars, sig, ttl_bars=ttl_hours)
+        _resolve_outcome(bars, sig, ttl_bars=ttl_hours,
+                         be_trigger=be_trigger_atr * atr if be_trigger_atr > 0 else 0.0)
         signals.append(sig)
         last_dir = direction
         last_idx = i
@@ -246,6 +300,7 @@ def run_backtest(
     realized = [s.realized_pct - slip * 2 for s in signals if s.realized_pct is not None]
     hits_tp = sum(1 for s in signals if s.status == "HIT_TP")
     hits_sl = sum(1 for s in signals if s.status == "HIT_SL")
+    hits_be = sum(1 for s in signals if s.status == "HIT_BE")
     expired = sum(1 for s in signals if s.status == "EXPIRED")
     longs = sum(1 for s in signals if s.direction == "LONG")
     shorts = n - longs
@@ -258,6 +313,7 @@ def run_backtest(
         "short_count": shorts,
         "tp_count": hits_tp,
         "sl_count": hits_sl,
+        "be_count": hits_be,
         "expired_count": expired,
         "hit_rate_tp": hits_tp / n,
         "expectancy_pct_post_slippage": statistics.mean(realized),

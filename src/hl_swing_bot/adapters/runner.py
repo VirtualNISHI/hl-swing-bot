@@ -11,13 +11,14 @@ import time
 
 from ..config import load_settings
 from ..storage import Storage
-from . import liquidation_cascade
+from . import coinalyze, liquidation_cascade
 
 log = logging.getLogger(__name__)
 
 # Registry of adapters. Each is a module exposing ingest(storage, *, ingested_at_ms).
 ADAPTERS = {
     "liquidation_cascade": liquidation_cascade,
+    "coinalyze": coinalyze,
 }
 
 

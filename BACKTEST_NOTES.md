@@ -238,6 +238,47 @@ portfolio (H2 neg) · vol-regime halves · depth≥3ATR · daily Coinalyze liq f
 5. Coinalyze 1h poller + Binance taker-imbalance backfill + 3y regime check
 6. No real money until ≥20 paper signals match backtest behavior
 
+## Joint backtest + implementation — 2026-06-10 (SHIPPED)
+
+Ran the pre-registered joint matrix (slope × streak × BE/TP exit) on BTC + ETH
+(scratch/joint_backtest2.py, results in scratch/joint_results.txt):
+
+| variant | BTC NET (h1/h2) | ETH NET (h1/h2) | decision |
+|---|---|---|---|
+| slope only | +0.318 (+0.27/+0.36) n=37 | +0.328 (+0.51/+0.21) n=45 | shipped |
+| **slope+streak2** | **+0.758 (+1.12/+0.53) n=26** | **+0.877 (+1.15/+0.67) n=26** | **SHIPPED** |
+| slope+BE1.25/TP2.0 | +0.454 (h2 +0.17 ⚠) | +0.448 (h2 +0.07 ⚠) | rejected |
+| slope+streak+BE/TP | +0.428 — *worse than streak alone* | +0.951 (h1-loaded +2.06/+0.14) | rejected |
+
+**Exit variant interaction confirmed the verifier's warning**: BE+TP2.0 was tuned on the
+unfiltered trade mix and HURTS the streak-filtered cascades (fixed TP2.5 captures more of
+the move; BE clips winners that retrace before continuing). Exits stay 1.5/2.5 ATR + 72h.
+
+**Live config after this change** (all in lockstep across features/signal/backtest):
+- SHORT-only, score≥3.0, move/ATR≥1.0, vol_z≥1.0
+- 4h SMA50 trend gate **+ slope gate** (SMA50 declining vs 10 4h-bars ago)
+- **red_4h_streak ≥ 2** (consecutive red 4h bars incl. partial bucket)
+- |funding_z_24| ≤ 2.5 (now computed from REAL hourly funding — see below)
+- R:R 1.5/2.5 ATR, 72h TTL, cooldown 4h/1h, 0.5% risk, cluster cap 1.5% **GLOBAL across coins**
+- Universe: **BTC + ETH** (HL_COINS env; SOL rejected)
+
+**Infrastructure shipped same day:**
+- `funding_rates` table + `fetch_funding_history` pagination + collector backfill
+  (200h on first run, incremental after). **Fixed latent bug**: `recent_funding_rates`
+  returned the last n SNAPSHOTS (5-min cadence ⇒ n=24 covered ~2 hours, not 24) — now
+  reads settled hourly rates, falls back to hour-deduped snapshots.
+- `funding_z_168` computed and LOGGED on every signal (mean/pstdev convention), not gated.
+- `backtest.py` gained slope_gate/red_streak_min/be_trigger_atr/target_atr_mult params +
+  HIT_BE status; defaults mirror live (slope ON, streak 2).
+- **Coinalyze adapter** (`adapters/coinalyze.py`): 1h long/short liquidations + OI for
+  BTC+ETH into the feature store. Backfilled 9,360 rows (~65d, the full upstream retention).
+  Runs in features.yml every 2h with COINALYZE_API_KEY secret. Pre-registered tests in the
+  adapter docstring gate any future use as entry features.
+
+Projection for the shipped config (point estimate, one regime cycle, n=26/coin —
+LOW CONFIDENCE): ~45 trades/yr/coin × ~+0.4R × 0.5% ≈ +9%/yr/coin before correlation;
+realistically mid-single-digits %/yr with maxDD ~3%. The paper track record decides.
+
 ## Quant panel review — 2026-06-10 (Codex + Grok + 6-lens panel)
 
 Three independent reviews converged: **as built, this is a coin-flip after costs.** The
