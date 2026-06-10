@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: hl-features
+  group: hl-db-commit
   cancel-in-progress: false
 
 jobs:
@@ -47,9 +47,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ -f data/market.duckdb ] && [ -n "$(git status --porcelain data/market.duckdb)" ]; then
-            git add data/market.duckdb
-            git commit -m "chore: feature ingestion [skip ci]"
-            git push || (git pull --rebase --autostash && git push)
+            cp data/market.duckdb /tmp/market.duckdb
+            for attempt in 1 2 3; do
+              git fetch origin && git reset --hard origin/main
+              cp /tmp/market.duckdb data/market.duckdb
+              git add data/market.duckdb
+              git commit -m "chore: feature ingestion [skip ci]"
+              git push && break
+              echo "push race (attempt $attempt), retrying"
+            done
           else
             echo "no feature change."
           fi
