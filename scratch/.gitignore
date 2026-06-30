@@ -1,2 +1,7 @@
 __pycache__/
 hist_1h.csv
+*.pkl
+*.json
+binance_*.csv
+hist_*.csv
+analyze_out.txt

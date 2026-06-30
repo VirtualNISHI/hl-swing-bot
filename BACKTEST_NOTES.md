@@ -238,6 +238,55 @@ portfolio (H2 neg) · vol-regime halves · depth≥3ATR · daily Coinalyze liq f
 5. Coinalyze 1h poller + Binance taker-imbalance backfill + 3y regime check
 6. No real money until ≥20 paper signals match backtest behavior
 
+## Slow-bleed research — 2026-07-01 (6 lenses, 100+ configs, Codex+Grok) → STAY DISCIPLINED
+
+Live trigger: BTC bled -10% over 2 weeks as a slow grind, the bot fired 0 trades. Question:
+expand to capture slow-bleed downtrends? Tested on **3y Binance BTC/ETH (26,280 1h bars each,
+2023-07..2026-06, many regimes)** + HL 208d. Rules of evidence: NET of 0.19% RT; must pass
+split-half (first 1.5y vs last 1.5y both +) AND cross-asset (BTC+ETH both +) AND HL hold.
+
+**VERDICT: STAY DISCIPLINED. 0 of 100+ configs passed. No expansion ships.**
+- Relax impulse gate (60-cell grid): **0/60** had a positive first half on either asset.
+- Continuation / lower-low / SMA-below / pullback-fade (EMA/RSI/Fib, 11 rules) / time-cadence
+  participation / longer-hold & trailing exits / regime-switch: **all net-negative on ≥1 asset**,
+  all fail split-half. Best "expansion" (drop move+vol gate, keep score≥3): BTC +0.067 but H1 −15.4,
+  ETH −0.057 — fails both gates.
+- Why slow bleeds resist shorting: punctuated by violent relief rallies that tag the 1.5-ATR stop
+  before the target (19–43% win rate the R:R can't survive). When forced to trade pure grinds the
+  baseline LOST (BTC 2024-01 −20% grind: 5 trades, −3.21% net).
+- Regime-switch proved adaptivity LOSES to purity on BOTH return and DD: routing a slow rule cut
+  ETH ann +2.88%→−0.13% and **tripled maxDD (4.2%→13.6%)**.
+- HL-208d makes rejected rules look great (it IS the favorable H2 bear regime) → textbook regime
+  trap, the strongest evidence FOR discipline.
+
+### ⚠️ CRITICAL side-finding: the shipped edge is itself REGIME-DEPENDENT
+The baseline FAILS its own split-half on 3y: **first half (2023-24 chop/range) is net-NEGATIVE on
+both BTC and ETH**; the entire SHORT edge lives in the 2025-26 bear. So:
+- **The "+12–13%/yr" figure is HL-208d only = a pure bear window. Regime-inflated.**
+- Honest full-3y multi-regime expectation at 0.5% risk: **~0%/yr BTC, +2.9%/yr ETH, maxDD 4–7%.**
+- Implication: the cascade edge is real but **conditional on a bearish/volatile macro regime**. In
+  2023-24-style chop or an uptrend it has no validated short edge — correctly sits out (which is
+  why it's flat, not losing, in the current grind).
+
+### Decision & implementation
+- **SHIP NOTHING NEW.** Leave signal.py/features.py/backtest.py entry+exit params exactly as-is.
+- The missed -10% grind was **correct, validated behavior** — the deliberate cost of not having a
+  profitable slow-bleed edge. Prize is large (naive hold +229%/+404%) but harvestability ≈ 0.
+- **Paper-only candidates (NOT shipped, must pass split-half+cross-asset+forward-HL first):**
+  (1) wider/trailing exit on already-firing entries (TARGET 3-4 ATR + chandelier) — failed split-half
+  here, A/B only; (2) a SLOWDOWN size-down/stand-aside flag (ret_30d<-3% & low recent move/ATR &
+  4h slope≤-1) used ONLY to suppress over-trading, never to add shorts.
+- **Next real research question** (separate study): a regime filter that DISARMS shorts in
+  non-bearish macro regimes to avoid the H1-type capital bleed — addresses the regime-dependence,
+  not the slow-bleed. Must itself pass split-half.
+
+Codex + Grok independently agreed pre-data: stay a cascade specialist; relaxing gates / time-
+participation "turn precision into exposure"; a second low-quality archetype hurts risk-adjusted
+return; only exit-extension on existing entries is worth even testing (and it failed here too).
+
+Scripts: scratch/ (analyze_all.py, relax_gate.py, fast_engine.py, grid.py, lens_*.py; outputs in
+analyze_out.txt, lens_final.json). No repo source modified.
+
 ## Joint backtest + implementation — 2026-06-10 (SHIPPED)
 
 Ran the pre-registered joint matrix (slope × streak × BE/TP exit) on BTC + ETH
